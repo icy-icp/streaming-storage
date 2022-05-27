@@ -2,3 +2,8 @@ canister_ids.json
 .dfx
 .DS_Store
 .idea
+.vessel
+
+upload.js
+media
+stream

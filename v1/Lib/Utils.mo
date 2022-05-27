@@ -18,5 +18,18 @@ module Utils{
         })
     };
 
+    func min(a:Nat, b: Nat): Nat{
+        if (a < b) a
+        else b
+    };
 
+    public func fixedLengthAdd<T>(arr: [T], size: Nat, value: T) : [T] {
+        Array.tabulate<T>(min(arr.size() + 1, 5), func(i : Nat) : T {
+            if (i < arr.size() - 1) {
+                arr[i + 1]
+            }else{
+                value
+            }
+        })
+    };
 };
