@@ -121,12 +121,6 @@ shared(installer) actor class Bucket() = this{
         };
     };
 
-    // func store_internal(args : StoreArgs) : (){
-    //     let _field = _getField(args.value.size());
-    //     stream_assets.put(args.key, _field);
-    //     _storageData(_field.0, args.value);
-    // };
-
     func _contains_chunk(key : Text, chunkId: Nat8) : Bool{
         switch (stream_assets.get(key)){
             case (null){
@@ -165,7 +159,6 @@ shared(installer) actor class Bucket() = this{
         }
     };
 
-
     // call back to isp canister
     public shared({caller}) func monitor() : async (){
         if (caller != Principal.fromActor(ISP)) return;
@@ -184,7 +177,6 @@ shared(installer) actor class Bucket() = this{
     };
 
     private func _getField(total_size : Nat) : (Nat64, Nat) {
-
         switch(Deque.popFront(overwrite_stores)){
             case (?(empty_store, deque)){
                 overwrite_stores := deque;
@@ -197,8 +189,6 @@ shared(installer) actor class Bucket() = this{
                 field
             };
         }
-
-        
     };
 
     private func _growStableMemoryPage(size : Nat) {
@@ -251,26 +241,6 @@ shared(installer) actor class Bucket() = this{
         token: ?StreamingCallbackToken;
     };
 
-    func parseId(id: Text):?{key: Text; chunkId: Nat}{
-        let parts = Iter.toArray(Text.split(id, #char '-'));
-        
-        if (parts.size() != 2){
-            return null;
-        };
-
-        switch (Moh.parseNat(parts[1], 10)){
-            case (#ok(num)){
-                ?{
-                    key = parts[0];
-                    chunkId = num;
-                }
-            };
-            case (_){
-                null
-            };
-        };
-    };
-
     func createToken(key: Text, chunkId: Nat): ?StreamingCallbackToken {
 
         switch (_contains_chunk(key, Nat8.fromNat(chunkId))) {
@@ -316,16 +286,10 @@ shared(installer) actor class Bucket() = this{
                  null 
             };
             case (?streamingToken) {
-                // Hack: https://forum.dfinity.org/t/cryptic-error-from-icx-proxy/6944/8
-                // Issue: https://github.com/dfinity/candid/issues/273
-
                 let self: Principal = Principal.fromActor(this);
                 let canisterId: Text = Principal.toText(self);
 
                 let canister = actor (canisterId) : actor { http_request_streaming_callback : shared () -> async () };
-
-                Debug.print("Creating streaming strategy");
-                Debug.print(debug_show streamingToken);
 
                 return ?#Callback({
                     token = streamingToken;
@@ -358,17 +322,10 @@ shared(installer) actor class Bucket() = this{
         switch(path.original){
             case("/storage"){
                 let key  = Option.get(url.queryObj.get("key"), "");
-                // let chunkId  = Option.get(url.queryObj.get("chunkId"), "");
 
-                Debug.print("Trying to get " # key); 
                 switch(_get_chunk(key, 0)){
                     case(#ok(data)){
-                        Debug.print( key # " Exists"); 
                         res
-                        // .header("Access-Control-Allow-Origin", "*")
-                        // .header("Content-Type", "video/mp4")
-                        // .header("accept-ranges", "bytes")
-                        // .header("cache-control", "private, max-age=0")
                         .body(data)
                         .streaming_strategy(
                             createStrategy(key, 1)
@@ -380,15 +337,6 @@ shared(installer) actor class Bucket() = this{
                         bad_request
                     };
                 }
-            };
-            case("/storage/keys"){
-                let keys = Iter.toArray(stream_assets.keys());
-
-                res
-                .header("Content-Type", "application/json")
-                .bodyFromText(F.format("{}", [#textArray(keys)]))
-                .unwrap();
- 
             };
             case("/redirect-to-google"){
                 res
