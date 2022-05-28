@@ -1,7 +1,7 @@
 {
   "canisters": {
     "bucket": {
-      "main": "v1/Bucket.mo",
+      "main": "v1/StreamingBucket.mo",
       "type": "motoko"
     }
   },

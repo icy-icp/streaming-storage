@@ -5,7 +5,13 @@ import Cycles "mo:base/ExperimentalCycles";
 import Debug "mo:base/Debug";
 import Error "mo:base/Error";
 import Iter "mo:base/Iter";
+import Nat8 "mo:base/Nat8";
 import Nat16 "mo:base/Nat16";
+import Nat32 "mo:base/Nat32";
+
+import List "mo:base/List";
+import Deque "mo:base/Deque";
+
 import Nat64 "mo:base/Nat64";
 import Option "mo:base/Option";
 import Principal "mo:base/Principal";
@@ -18,7 +24,7 @@ import Types "Lib/Types";
 import HttpParser "mo:httpie/Parser";
 import HttpResponse "mo:httpie/Response";
 import F "mo:format";
-import Op "mo:op";
+import Moh "mo:op";
 import Utils "Lib/Utils";
 
 shared(installer) actor class Bucket() = this{
@@ -27,114 +33,138 @@ shared(installer) actor class Bucket() = this{
     private let CYCLE_THRESHOLD         = 3_000_000_000_000;
     private let ISP : IspInterface      = actor (Principal.toText(installer.caller));
     private stable var offset           = 0;
-    private stable var assets_entries : [var (Text, (Nat64, Nat))] = [var];
-    private var assets : TrieMap.TrieMap<Text, (Nat64, Nat)> = TrieMap.fromEntries<Text, (Nat64, Nat)>(assets_entries.vals(), Text.equal, Text.hash);
     stable let CHUNKS_PER_STORE = 5;
     stable let MAX_BYTES_PER_CALL = 2_097_152;
 
-    //           (chunkId, start, end)
-    type Chunk = (Nat16, Nat64, Nat);
+    //           (chunkId, start, length)
+    type Chunk = (Nat8, Nat64, Nat);
+    type Stream = [Chunk];
 
-    //                  (start, chunks)
-    type StreamStore = (Nat64, [Chunk]);
-    private stable var stream_entries : [var (Text, StreamStore)] = [var];
+    private stable var stream_entries : [ (Text, Stream)] = [];
 
-    private var stream_assets : TrieMap.TrieMap<Text, StreamStore> = TrieMap.fromEntries<Text, StreamStore>(stream_entries.vals(), Text.equal, Text.hash);
-    stable let overwrite_stores: [StreamStore] = [(0, [])];
+    private let stream_assets : TrieMap.TrieMap<Text, Stream> = TrieMap.fromEntries<Text, Stream>(stream_entries.vals(), Text.equal, Text.hash);
+
+    stable var overwrite_stores: Deque.Deque<Nat64> = Deque.empty<Nat64>();
     
     public query({caller}) func get(key : Text) : async Result.Result<Blob, ()> {
-        switch(assets.get(key)) {
-            case(null) { 
-                #err(())
-            };
-            case(?field) {
-                #ok(_loadFromSM(field.0, field.1))
-            };
-        }
+        _get_chunk(key, 0)
     };
 
-    public query({caller}) func get_chunk(key : Text, chunkId: Nat16) : async Result.Result<Blob, ()> {
-        switch(stream_assets.get(key)) {
-            case(null) { 
-                #err(())
-            };
-            case(?(stream_start, chunks)) {
-                label l for ((id, start, end) in chunks.vals()){
-                    if (chunkId == id){
-                        return #ok(_loadFromSM(start, end));
-                    }else if (chunkId > id){
-                        break l;
-                    }
-                };
-                #err(())
-            };
-        }
+    public query({caller}) func get_chunk(key : Text, chunkId: Nat8) : async Result.Result<Blob, ()> {
+        _get_chunk(key, chunkId)
     };
 
     public shared({caller}) func store(args : StoreArgs) : async (){
         assert(caller == Principal.fromActor(ISP));
-        
+
         switch (stream_assets.get(args.key)){
             case (null){
                 let (stream_start, _) = _getField(MAX_BYTES_PER_CALL * CHUNKS_PER_STORE);
-                stream_assets.put(args.key, (stream_start, [(0, stream_start, args.value.size())]));
                 _storageData(stream_start, args.value);
-            };
-            case (?(stream_start, chunks)){
 
-                let chunkId: Nat = if (chunks.size() < CHUNKS_PER_STORE){
-                    chunks.size()
+                stream_assets.put(args.key, [(0, stream_start, args.value.size())]);
+            };
+            case (?chunks){
+                //  start of first chunk 
+                let (_, stream_start, _) = chunks[0];
+
+                let new_chunk: Chunk = if (chunks.size() < CHUNKS_PER_STORE){
+                    let chunkId = chunks.size();
+
+                    let chunk_start = Nat64.toNat(stream_start) +  (chunkId * MAX_BYTES_PER_CALL);
+
+                    (
+                        Nat8.fromNat(chunkId), 
+                        Nat64.fromNat(chunk_start), 
+                        args.value.size()
+                    )
                 }else{
-                    let (last_chunkId, _, _) = chunks[chunks.size() - 1];
-                    Nat16.toNat(last_chunkId)
+
+                    let (frontChunkId, chunkPtr, _) = chunks[0];
+
+                    let chunkId = frontChunkId + Nat8.fromNat(chunks.size());
+
+                    (chunkId, chunkPtr, args.value.size())
+                    
                 };
 
-                let chunk_start = Nat64.toNat(stream_start) +  (chunkId * MAX_BYTES_PER_CALL);
-                let chunk_end = args.value.size() + chunk_start;
-
-                let new_chunk = 
-                    (
-                        Nat16.fromNat(chunkId), 
-                        Nat64.fromNat(chunk_start), 
-                        chunk_end
-                    );
-
-                _storageData(Nat64.fromNat(chunk_start), args.value);
+                _storageData(new_chunk.1, args.value);
 
                 let new_chunks = Utils.fixedLengthAdd(chunks, 5,  new_chunk);
-                stream_assets.put(args.key, (stream_start, new_chunks));
+
+                var index: Nat8 = 0;
+                let ordered_chunks = Array.map<Chunk, Chunk>(new_chunks, func(chunk){
+                    let result = (index, chunk.1, chunk.2);
+                    index+=1;
+                    result
+                });
+
+                stream_assets.put(args.key, ordered_chunks);
             };
         };
     };
 
-    // public shared ({caller}) func delete(key: Text) : async (){
-    //     assert(caller == Principal.fromActor(ISP));
-    //     switch (assets.get(key)){
+    public shared ({caller}) func delete(key: Text) : async (){
+        assert(caller == Principal.fromActor(ISP));
+        switch (stream_assets.remove(key)){
             
-    //         case (?location){
-    //             overwrite_stores.push(location);
-    //             assets.remove(key);
-    //         };
-    //         case (_){};
-    //     };
-    // };
+            case (?chunks){
+                let (_, stream_start, _) = Moh.Array.min<Chunk>(chunks, func(a,b){
+                    let (_, a_start, _) = a;
+                    let (_, b_start, _) = b;
+                    Nat64.compare(a_start, b_start)
+                });
 
-    func store_internal(args : StoreArgs) : (){
-        let _field = _getField(args.value.size());
-        assets.put(args.key, _field);
-        _storageData(_field.0, args.value);
+                overwrite_stores := Deque.pushBack(overwrite_stores, stream_start);
+            };
+            case (_){};
+        };
     };
 
-    func get_internal(key : Text) : Result.Result<Blob, ()> {
-        switch(assets.get(key)) {
+    // func store_internal(args : StoreArgs) : (){
+    //     let _field = _getField(args.value.size());
+    //     stream_assets.put(args.key, _field);
+    //     _storageData(_field.0, args.value);
+    // };
+
+    func _contains_chunk(key : Text, chunkId: Nat8) : Bool{
+        switch (stream_assets.get(key)){
+            case (null){
+                false
+            };
+            case (?chunks){
+                let (frontChunkId, _, _) = chunks[0];
+
+                let index = chunkId - frontChunkId;
+                if (index < Nat8.fromNat(chunks.size())){
+                    let (realChunkId, _, _) = chunks[Nat8.toNat(index)];
+                    realChunkId == chunkId
+                }else{
+                    false
+                }
+            };
+        };
+    };
+    
+    func _get_chunk(key : Text, _chunkId: Nat8) : Result.Result<Blob, ()> {
+        switch(stream_assets.get(key)) {
             case(null) { 
                 #err(())
             };
-            case(?field) {
-                #ok(_loadFromSM(field.0, field.1))
+            case(?chunks) {
+                Debug.print(debug_show chunks);
+                let chunkId = Nat8.toNat(_chunkId);
+                if (chunkId < chunks.size()){
+                    let (_, start, len) = chunks[chunkId];
+
+                    #ok(_loadFromSM(start, len))
+                }else{
+                    #err(())
+                }
             };
         }
     };
+
 
     // call back to isp canister
     public shared({caller}) func monitor() : async (){
@@ -154,10 +184,21 @@ shared(installer) actor class Bucket() = this{
     };
 
     private func _getField(total_size : Nat) : (Nat64, Nat) {
-        let field = (Nat64.fromNat(offset), total_size);
-        _growStableMemoryPage(total_size);
-        offset += total_size;
-        field
+
+        switch(Deque.popFront(overwrite_stores)){
+            case (?(empty_store, deque)){
+                overwrite_stores := deque;
+                return (empty_store, total_size);
+            };
+            case(_){
+                let field = (Nat64.fromNat(offset), total_size);
+                _growStableMemoryPage(total_size);
+                offset += total_size;
+                field
+            };
+        }
+
+        
     };
 
     private func _growStableMemoryPage(size : Nat) {
@@ -210,11 +251,6 @@ shared(installer) actor class Bucket() = this{
         token: ?StreamingCallbackToken;
     };
 
-    func createId(key: Text, chunkId: Nat): Text{
-        F.format("{}-{}", [#text(key), #num(chunkId)])
-    };
-
-
     func parseId(id: Text):?{key: Text; chunkId: Nat}{
         let parts = Iter.toArray(Text.split(id, #char '-'));
         
@@ -222,7 +258,7 @@ shared(installer) actor class Bucket() = this{
             return null;
         };
 
-        switch (Op.parseNat(parts[1], 10)){
+        switch (Moh.parseNat(parts[1], 10)){
             case (#ok(num)){
                 ?{
                     key = parts[0];
@@ -236,10 +272,9 @@ shared(installer) actor class Bucket() = this{
     };
 
     func createToken(key: Text, chunkId: Nat): ?StreamingCallbackToken {
-        let id = createId(key, chunkId);
 
-        switch (get_internal(id)) {
-            case (#ok(_)) {
+        switch (_contains_chunk(key, Nat8.fromNat(chunkId))) {
+            case (true) {
                 ?{
                     key = key;
                     content_encoding = "";
@@ -255,12 +290,10 @@ shared(installer) actor class Bucket() = this{
 
     public shared query func http_request_streaming_callback(streamingToken: StreamingCallbackToken) : async StreamingCallbackHttpResponse {
         let {key; index} = streamingToken;
-        let id = createId(key, index);
-        Debug.print("key: " # id);
 
-        switch (get_internal(id)) {
+        switch (_get_chunk(key, Nat8.fromNat(index))) {
             case (#ok (data)) {
-                Debug.print("Found "# id);
+                Debug.print("Found "# key # debug_show index);
 
                 return {
                     token = createToken(key, index + 1);
@@ -275,7 +308,7 @@ shared(installer) actor class Bucket() = this{
     };
 
     func createStrategy(key: Text, chunkId: Nat) : ?StreamingStrategy {
-        let streamingToken: ?StreamingCallbackToken = createToken(key, 0,);
+        let streamingToken: ?StreamingCallbackToken = createToken(key, chunkId);
 
         switch (streamingToken) {
             case (null) {
@@ -326,10 +359,9 @@ shared(installer) actor class Bucket() = this{
             case("/storage"){
                 let key  = Option.get(url.queryObj.get("key"), "");
                 // let chunkId  = Option.get(url.queryObj.get("chunkId"), "");
-                let id = createId(key, 0);
 
                 Debug.print("Trying to get " # key); 
-                switch(get_internal(id)){
+                switch(_get_chunk(key, 0)){
                     case(#ok(data)){
                         Debug.print( key # " Exists"); 
                         res
@@ -349,40 +381,14 @@ shared(installer) actor class Bucket() = this{
                     };
                 }
             };
-            case("/storage/chunk"){
-                let key  = Option.get(url.queryObj.get("key"), "");
-                // let chunkId  = Option.get(url.queryObj.get("chunkId"), "");
-
-                Debug.print("Trying to get " # key); 
-                switch(get_internal(key)){
-                    case(#ok(data)){
-                        Debug.print( key # " Exists"); 
-                        res
-                        .header("Access-Control-Allow-Origin", "*")
-                        .header("Content-Type", "image/jpeg")
-                        .body(data)
-                        .unwrap()
-                    };
-                    case(_){
-                        Debug.print("Failed to get " # key); 
-                        bad_request
-                    };
-                }
-            };
             case("/storage/keys"){
-                let keys = Iter.toArray(assets.keys());
+                let keys = Iter.toArray(stream_assets.keys());
 
                 res
                 .header("Content-Type", "application/json")
                 .bodyFromText(F.format("{}", [#textArray(keys)]))
                 .unwrap();
  
-            };
-            case("/"){
-                res
-                .header("Content-Type", "text/html")
-                .bodyFromText("<html><body><input type=\"file\" id=\"upload\"></body><html>")
-                .unwrap();
             };
             case("/redirect-to-google"){
                 res
@@ -400,16 +406,11 @@ shared(installer) actor class Bucket() = this{
     };
 
     system func preupgrade() {
-        assets_entries := Array.init<(Text, (Nat64, Nat))>(assets.size(), ("", (0, 0)));
-        var assets_index = 0;
-        for (a in assets.entries()) {
-            assets_entries[assets_index] := a;
-            assets_index += 1;
-        };
+        stream_entries := Iter.toArray<(Text, Stream)>(stream_assets.entries());
     };
 
     system func postupgrade() {
-        assets_entries := [var];
+        stream_entries := [];
     };
 
 };

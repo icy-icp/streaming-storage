@@ -49,7 +49,6 @@ shared(installer) actor class isp()  = this {
         return #err(())
     };
 
-
     public query({caller}) func getBuckets() : async (LiveBucketExt, [Principal]){
         assert(caller == ADMIN);
         let res = Array.init<Principal>(buckets.size(), Principal.fromActor(this));

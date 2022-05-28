@@ -2,6 +2,9 @@ import Blob "mo:base/Blob";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
+import Nat "mo:base/Nat";
+
+import Debug "mo:base/Debug";
 
 module Utils{
 
@@ -18,16 +21,16 @@ module Utils{
         })
     };
 
-    func min(a:Nat, b: Nat): Nat{
-        if (a < b) a
-        else b
-    };
 
     public func fixedLengthAdd<T>(arr: [T], size: Nat, value: T) : [T] {
-        Array.tabulate<T>(min(arr.size() + 1, 5), func(i : Nat) : T {
-            if (i < arr.size() - 1) {
-                arr[i + 1]
+        let newSize = Nat.min(arr.size() + 1, size);
+
+        Array.tabulate<T>(newSize, func(i : Nat) : T {
+            Debug.print("fla: " # debug_show (i, newSize));
+            if (i + 1  < newSize) {
+                arr[i + (if (arr.size() >= newSize){ 1} else {0})]
             }else{
+                Debug.print("value: ");
                 value
             }
         })
